@@ -1,0 +1,556 @@
+from robot_def import *
+from robot_objects import Object
+from robot_stage import Stage
+
+import time
+import numpy as np
+import heapq
+import random
+import curses
+            
+
+# eventi
+        
+def robot_thread(robot: Object, staging: Stage):
+
+    while robot.energy > 0:
+        if robot.blocked == True:
+            robot.outlook = robot_fire_directions.get(robot.direction) 
+            robot.blocked = False
+            robot.collisions = []
+
+        update_robot(robot)
+
+        # if not robot.to_move and not robot.fired:
+        #     visited = mod_dijkstra(robot, staging)
+        #     staging.view = visited
+        
+        time.sleep(0.08)
+            
+
+    # rimozione del robot
+    robot.alive = False
+
+def monster_thread(monster: Object, staging: Stage):
+            
+    while monster.energy > 0:
+
+        # condizione se l'oggetto trova un ostacolo improvviso
+        if monster.blocked == True:
+            monster.outlook =monster_directions_bump.get(monster.direction) 
+            monster.path = []
+            monster.blocked = False
+            monster.collisions = []
+
+        # non esegue alcuna operazione se l'oggetto è in movimento
+        if not monster.to_move and not monster.fired:
+
+            # controlla dove si trova il robot
+            robots = staging.get_objects("robot")
+            if any(robots):
+                robot = robots[0]
+                (cos_dir, pool_th) = on_target(robot, monster)
+                pool = random.randint(1, 200)
+
+                if cos_dir < 0.005 and pool < pool_th:
+                    # spara un proiettile
+                    staging.idnum += 1
+                    monster_bullet = generate_monster_bullet(monster, staging)
+                    monster.fired = True
+                    monster.creation_time = time.time()
+                    continue
+                    
+            # esegue la sequenza se la stack di mosse è piena
+            if any(monster.path):
+                monster.direction = monster.path.pop(0)
+                monster.outlook = monster_directions.get(monster.direction)
+                monster.to_move = True
+            
+            # altrimenti genera un nuovo percorso
+            else:
+                generate_path(monster, staging)
+        
+        # pausa dovuta allo sparo del proiettile
+        is_idle = (time.time() - monster.creation_time) > MONSTER_IDLE_TIME
+        if is_idle: monster.fired = False
+
+        # velocità di esecuzione del ciclo
+        time.sleep(0.08)
+    
+    # rimozione del mostro
+    monster.alive = False
+
+def robot_shield_thread(shield: Object, staging: Stage):
+    
+    while shield.energy > 0:
+        update_shield(shield)
+        
+        # velocità di esecuzione del ciclo
+        time.sleep(0.08)
+    
+    # rimozione del mostro
+    shield.alive = False
+
+def robot_bullet_thread(bullet: Object, staging: Stage):
+
+    while bullet.energy > 0:
+
+        if bullet.blocked == True:
+            # aggiorna la figura del proiettile
+            bullet.outlook = robot_bullet_directions.get(bullet.direction)
+
+            # controllo delle collisioni
+            if not BORDER_OBSTACLE in bullet.collisions:
+                # collisione con un oggetto
+
+                # per i proiettili è possibile che più di un oggetto venga colpito
+                # perchè il proiettile si muove di una distanza molto grande
+                # pertanto bisogna evitare che bypassi lo scudo
+                shield_collision = [obj for obj in bullet.collisions if obj.id == "robot_shield"]
+                if not any(shield_collision):
+                    bullet.collisions[0].energy -= 1
+                else:
+                    shield_collision[0].energy -= 1
+            else:
+                # collisione sul bordo
+                pass
+
+            bullet.blocked = False
+            bullet.collisions = []
+            break
+
+        time.sleep(0.08)
+        if bullet.to_move == False: bullet.to_move = True
+            
+    # rimozione del proiettile
+    bullet.alive = False
+
+def monster_bullet_thread(bullet: Object, staging: Stage):
+
+    while bullet.energy > 0:
+
+        if bullet.blocked == True:
+            # aggiorna la figura del proiettile
+            bullet.outlook = robot_bullet_directions.get(bullet.direction)
+
+            # controllo delle collisioni
+            if not BORDER_OBSTACLE in bullet.collisions:
+                # collisione con un oggetto
+
+                # per i proiettili è possibile che più di un oggetto venga colpito
+                # perchè il proiettile si muove di una distanza molto grande
+                # pertanto bisogna evitare che bypassi lo scudo
+                shield_collision = [obj for obj in bullet.collisions if obj.id == "robot_shield"]
+                if not any(shield_collision):
+                    bullet.collisions[0].energy -= 1
+                else:
+                    shield_collision[0].energy -= 1
+            else:
+                # collisione sul bordo
+                pass
+
+            bullet.blocked = False
+            bullet.collisions = []
+            break
+
+        time.sleep(0.08)
+        if bullet.to_move == False: bullet.to_move = True
+            
+    # rimozione del proiettile
+    bullet.alive = False
+
+
+# aggiornamento degli oggetti          
+
+def update_robot(robot: Object): 
+    # controlla prima se il robot è fermo oltre il tempo morto
+    is_idle = (time.time() - robot.creation_time) > ROBOT_IDLE_TIME
+    if is_idle:
+        # avvia sequenza del tempo morto
+        sequence = robot_greet_directions.get(robot.direction) 
+        robot.frame += 1
+        if robot.frame < len(sequence):
+            # esecuzione della sequenza
+            robot.outlook = sequence[robot.frame]
+        else:
+            # termine della sequenza
+            robot.creation_time = time.time()
+            robot.outlook = robot_directions.get(robot.direction)
+            robot.frame = INIT_FRAME
+    
+def update_shield(shield: Object):
+    if (time.time() - shield.creation_time) >= 1:
+        shield.energy -= 1
+        shield.frame  += 1
+        shield.outlook = [SHIELD_SEQUENCE[shield.frame] * shield.w] * shield.h
+        shield.creation_time = time.time()
+        
+def generate_path(object: Object, staging: Stage):
+    
+    temp = Object("temp", object.h, object.w, object.y, object.x, staging.current_time)
+    temp.idnum = object.idnum
+        
+    # definisce le coordinate di destinazione
+    empty = False
+    while not empty:
+        temp.y = random.randint(1, staging.height - temp.h)
+        temp.x = random.randint(1, staging.width - 1 - temp.w)
+        empty = not any(staging.get_obstacles(temp))
+
+    # inizializza la partenza e la destinazione del percorso
+    temp.ty, temp.tx = temp.y, temp.x
+    temp.y, temp.x = object.y, object.x
+               
+    # calcola il percorso più breve   
+    shortest_distance, shortest_path = dijkstra(temp, staging)
+    
+    # se esiste un percorso salva la sequenza di monvimenti
+    if shortest_distance > 0: object.path = shortest_path
+
+# funzioni varie
+
+def get_color(y, x, color1, color2):
+    color_pair = color1 if (x + y) % 2 == 0 else color2
+    return color_pair
+
+def get_direction(key):
+    directions_mapping = {
+        curses.KEY_UP: "UP",
+        curses.KEY_DOWN: "DOWN",
+        curses.KEY_LEFT: "LEFT",
+        curses.KEY_RIGHT: "RIGHT"
+    }
+    return directions_mapping.get(key, "RIGHT")    
+
+# funzioni di collisione
+def on_target(target, object):
+    target_coor = np.array([target.y, target.x])
+    object_coor = np.array([object.y, object.x])
+    distance = np.linalg.norm(target_coor - object_coor)
+    direction_array = np.array(general_directions.get(object.direction))
+    on_target = abs(np.inner(target_coor - object_coor, direction_array) / distance - 1)
+    return (on_target, 1000 / distance)
+
+# generazione degli oggetti
+
+def deploy_object(object: Object):
+
+    # Crea la finestra e la aggiunge come proprietà all'oggetto
+    window = curses.newwin(object.h, object.w, object.y, object.x)
+    window.bkgdset(curses.color_pair(object.color))
+    window.noutrefresh()
+    object.window = window
+
+def deploy_random_object(staging: Stage, object: Object):
+
+    # definisce le coordinate
+    empty = False
+    while not empty:
+        object.y = random.randint(1, staging.height - object.h)
+        object.x = random.randint(1, staging.width - 1 - object.w)
+        empty = not any(staging.get_obstacles(object))
+
+    deploy_object(object)
+
+def generate_wall(zone_h, zone_w, zone_y, zone_x, staging: Stage):
+
+    # definisce le dimensioni
+    wall_h = random.randint(2, zone_h)
+    wall_w = WALL_AREA // wall_h
+    wall = Object("wall", wall_h, wall_w, 0, 0, staging.current_time)
+    wall.color = 1
+    
+    # definisce le coordinate
+    empty = False
+    while not empty:
+        wall.y = random.randint(zone_y, zone_y + zone_h - wall.h)
+        wall.x = random.randint(zone_x, zone_x + zone_w - wall.w)
+        empty = not any(staging.get_obstacles(wall))
+
+    deploy_object(wall)  
+
+    # setta le proprietà dell'oggetto
+    wall.energy = 100
+    wall.idnum = staging.idnum
+
+    # prepara l'aspetto
+    wall.outlook = [" " * wall.w] * wall.h
+    
+    # aggiorna lo scenario
+    staging.add(wall)
+    
+def generate_robot(staging: Stage):
+
+    robot = Object("robot", ROBOT_HEIGHT, ROBOT_WIDTH, 0, 0, staging.current_time)
+    robot.color = 4
+    
+    deploy_random_object(staging, robot)  
+
+    # setta le proprietà dell'oggetto
+    robot.speed = ROBOT_SPEED
+    robot.radius = ROBOT_RADIUS
+    robot.energy = ROBOT_ENERGY
+    robot.idnum = staging.idnum
+
+    # offset rispetto alle coordinate della finestra
+    robot.osy = 1 
+    robot.osx = 2 
+
+    # prepara l'aspetto
+    robot.outlook = robot_directions.get(robot.direction)
+
+    # crea e lancia il processo
+    robot.thread = robot_thread
+    staging.start(robot)
+
+    return robot
+
+def generate_monster(staging: Stage):
+    
+    monster = Object("monster", MONSTER_HEIGHT, MONSTER_WIDTH, 0, 0, staging.current_time)
+    monster.color = 3
+    
+    deploy_random_object(staging, monster)  
+
+    # setta le proprietà dell'oggetto
+    monster.speed = MONSTER_SPEED
+    monster.radius = MONSTER_RADIUS
+    monster.energy = MONSTER_ENERGY
+    monster.idnum = staging.idnum
+
+    # offset rispetto alle coordinate della finestra
+    monster.osy = 2 
+    monster.osx = 2 
+
+    # prepara l'aspetto
+    monster.outlook = monster_directions.get(monster.direction)
+
+    # Inizializza la lista con il percorso dei movimenti del monster
+    monster.path = []
+
+    # crea e lancia il processo
+    monster.thread = monster_thread
+    staging.start(monster)
+
+    return monster
+
+def generate_robot_bullet(staging: Stage):
+    # recupera i riferimenti al robot per la posizione iniziale
+    robot = (staging.get_objects("robot"))[0]
+    bullet_y, bullet_x = robot.bullet_deployment()
+
+    # prepara le dimensioni del proiettile
+    bullet_outlook = robot_bullet_directions.get(robot.direction)
+    bullet_height, bullet_width = len(bullet_outlook), len(bullet_outlook[0]) 
+
+    bullet = Object("robot_bullet", bullet_height, bullet_width, bullet_y, bullet_x, staging.current_time)
+    bullet.color = 2
+
+    # controlla che possa essere generato
+    obstacles = staging.get_obstacles(bullet)
+    can_be_generated = not any(obstacles)
+
+    if can_be_generated:
+        
+        deploy_object(bullet)  
+
+        # setta le proprietà dell'oggetto
+        bullet.direction = robot.direction
+        bullet.speed = BULLET_SPEED
+        bullet.energy = 1
+        bullet.idnum = staging.idnum
+
+        # offset rispetto alle coordinate della finestra
+        #bullet.osy = bullet_osy
+        #bullet.osx = bullet_osx
+        
+        # prepara l'aspetto
+        bullet.outlook = robot_bullet_directions.get(bullet.direction)
+    
+        # crea e lancia il processo
+        bullet.thread = robot_bullet_thread
+        staging.start(bullet)
+
+    else:
+        # collisione con un oggetto che non sia il bordo
+        if not BORDER_OBSTACLE in obstacles:
+            obstacles[0].energy -= 1
+
+    return bullet
+
+def generate_robot_shield(staging: Stage):
+    # recupera i riferimenti al robot per la posizione iniziale
+    robot = (staging.get_objects("robot"))[0]
+    shield_y, shield_x = robot.shield_deployment()
+
+    # prepara le dimensioni del proiettile
+    shield_outlook = shield_directions.get(robot.direction)
+    shield_height, shield_width = shield_outlook[0], shield_outlook[1]
+
+    shield = Object("robot_shield", shield_height, shield_width, shield_y, shield_x, staging.current_time)
+    shield.color = 2
+
+    # controlla che possa essere generato
+    obstacles = staging.get_obstacles(shield)
+    can_be_generated = not any(obstacles)
+
+    if can_be_generated:
+        
+        deploy_object(shield)  
+
+        # setta le proprietà dell'oggetto
+        shield.energy = len(SHIELD_SEQUENCE)
+        shield.idnum = staging.idnum
+        
+        # offset rispetto alle coordinate della finestra
+        pass
+
+        # prepara l'aspetto
+        shield.outlook = [SHIELD_SEQUENCE[0] * shield_width] * shield_height
+        
+        # crea e lancia il processo
+        shield.thread = robot_shield_thread
+        staging.start(shield)
+    
+    return shield
+
+def generate_monster_bullet(monster: Object, staging: Stage):
+
+    # prepara le coordinate di posizionamento
+    bullet_y, bullet_x = monster.bullet_deployment()
+
+    # prepara le dimensioni del proiettile
+    bullet_outlook = monster_bullet_directions.get(monster.direction)
+    bullet_height, bullet_width = len(bullet_outlook), len(bullet_outlook[0]) 
+
+    bullet = Object("monster_bullet", bullet_height, bullet_width, bullet_y, bullet_x, staging.current_time)
+    bullet.color = 2
+
+    # controlla che possa essere generato
+    obstacles = staging.get_obstacles(bullet)
+    can_be_generated = not any(obstacles)
+
+    if can_be_generated:
+
+        deploy_object(bullet)  
+
+        # setta le proprietà dell'oggetto
+        bullet.direction = monster.direction
+        bullet.speed = BULLET_SPEED
+        bullet.energy = 1
+        bullet.idnum = staging.idnum
+
+        # offset rispetto alle coordinate della finestra
+        #bullet.osy = bullet_osy
+        #bullet.osx = bullet_osx
+
+        # prepara l'aspetto
+        bullet.outlook = monster_bullet_directions.get(bullet.direction)
+        
+        # crea e lancia il processo
+        bullet.thread = monster_bullet_thread
+        staging.start(bullet)
+
+    else:
+        # collisione con un oggetto che non sia il bordo
+        if not BORDER_OBSTACLE in obstacles:
+            obstacles[0].energy -= 1
+
+    return can_be_generated, bullet
+
+
+# funzioni basate sulla geometria
+
+def dijkstra(object: Object, staging: Stage):
+    # Coda con priorità per mantenere i nodi con la distanza minima in cima
+    start = (object.y, object.x)
+    end = (object.ty, object.tx)
+    path = []
+    priority_queue = [(0, start, path)]
+
+    # Crea un set delle posizioni già controllate
+    visited = set()
+
+    # Inizia il ciclo sulla coda di lavoro
+    while priority_queue:
+        current_distance, current_node, current_path = heapq.heappop(priority_queue)
+
+        # Raggiunge il bersaglio
+        if current_node == end:
+            
+            # riposiziona l'oggetto dopo la routine dijkstra
+            object.y, object.x = start[0], start[1]
+            return (current_distance, current_path)
+        
+        # Ricade su un luogo già visitato
+        if current_node in visited:
+            continue
+        
+        # Aggiunge il nodo alla lista dei visitati (i valori doppi sono rimossi) 
+        visited.add(current_node)
+        
+        # Esplora tutte e quattro le direzioni
+        for direction in general_directions:
+            dy, dx = general_directions.get(direction)
+            object.y, object.x = current_node[0] + dy, current_node[1] + dx
+            obstacles = staging.get_obstacles(object)
+            can_be_moved = not any(obstacles)
+            if can_be_moved:
+                y, x = current_node[0] + dy, current_node[1] + dx
+                new_node = (y, x)
+                new_path = current_path + [direction]
+                heapq.heappush(priority_queue, (current_distance + 1, new_node, new_path))
+
+    # Se non è possibile raggiungere la destinazione
+    
+    # riposiziona l'oggetto dopo la routine dijkstra
+    object.y, object.x = start[0], start[1]
+
+    return (-1, [])
+
+def mod_dijkstra(object: Object, staging: Stage):
+    # Coda con priorità per mantenere i nodi con la distanza minima in cima
+    start = (object.y + object.osy, object.x + object.osx)
+    obj_coor = np.array([start[0], start[1]])
+    priority_queue = [(0, start)]
+
+    # Crea un set delle posizioni già controllate
+    visited = set()
+    
+    # Inizia il ciclo sulla coda di lavoro
+    while priority_queue:
+        current_distance, current_node = heapq.heappop(priority_queue)
+
+        # Ricade su un luogo già visitato
+        if current_node in visited:
+            continue
+
+        # Aggiunge il nodo alla lista dei visitati (i valori doppi sono rimossi) 
+        visited.add(current_node)
+
+        # Esplora tutte e quattro le direzioni
+        for direction in general_directions:
+
+            # controlal che non ci siano collisioni su un oggetto temporaneo
+            dy, dx = general_directions.get(direction)
+            new_y, new_x = current_node[0] + dy, current_node[1] + dx
+            object_temp = Object("temp", 1, 1, new_y, new_x, staging.current_time)
+            obstacles = staging.get_obstacles(object_temp)
+
+            if not BORDER_OBSTACLE in obstacles:
+                walls_collided = [obj for obj in obstacles if obj.id == "wall"]    
+                if not any(walls_collided):
+                    target_coor = np.array([new_y, new_x])
+                    vector = target_coor - obj_coor
+                    distance = np.linalg.norm(vector)
+                    a, b = abs(vector[0]), abs(vector[1])
+                    error = (current_distance + 1.0) ** 2 - distance ** 2 - 2 * a * b            
+                    if abs(error) <= 0.001 and distance <= ROBOT_RANGE_VIEW:
+                        new_node = (new_y, new_x)
+                        heapq.heappush(priority_queue, (current_distance + 1.0, new_node))
+        
+    # Tutti i nodi sono stati visitati
+    return visited
+
+
+
